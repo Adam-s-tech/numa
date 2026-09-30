@@ -32,11 +32,15 @@ pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request)
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
 
-    let body = match axum::body::to_bytes(req.into_body(), MAX_DNS_MSG).await {
-        Ok(b) => b,
-        Err(_) => {
+    // Past the headers hyper's read timeout no longer applies, so a withheld
+    // body would pin the connection slot.
+    let read = axum::body::to_bytes(req.into_body(), MAX_DNS_MSG);
+    let body = match tokio::time::timeout(super::proxy::REQUEST_READ_TIMEOUT, read).await {
+        Ok(Ok(b)) => b,
+        Ok(Err(_)) => {
             return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 4096 bytes").into_response();
         }
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
 
     if body.is_empty() {
@@ -85,24 +89,15 @@ fn doh_validate(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Gate DoH only — service-proxy routes on the same TLS listener
-    // aren't subject to the DNS ACL. Fail closed when the peer is unknown.
-    if state.ctx.allow_from.is_enabled() {
-        let allowed = state
-            .remote_addr
-            .is_some_and(|a| state.ctx.allow_from.allows(a.ip()));
-        if !allowed {
-            match state.remote_addr {
-                Some(a) => debug!("DoH: dropping {a} — not in allow_from"),
-                None => debug!("DoH: dropping unknown peer — not in allow_from"),
-            }
-            return Err(StatusCode::FORBIDDEN);
-        }
+    // The accept loop admits PROXY LOCAL probes regardless of `allow_from`;
+    // they must not resolve.
+    let peer = state.remote_addr;
+    if !state.ctx.allow_from.allows(peer.ip()) {
+        debug!("DoH: dropping {peer} — not in allow_from");
+        return Err(StatusCode::FORBIDDEN);
     }
 
-    Ok(state
-        .remote_addr
-        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0))))
+    Ok(peer)
 }
 
 fn is_doh_host(host: Option<&str>, tld: &str) -> bool {
@@ -276,7 +271,7 @@ mod tests {
         let ctx = std::sync::Arc::new(crate::testutil::test_ctx().await);
         let state = crate::proxy::DohState {
             ctx,
-            remote_addr: Some("127.0.0.1:1234".parse().unwrap()),
+            remote_addr: "127.0.0.1:1234".parse().unwrap(),
         };
         let req = Request::builder()
             .uri(format!("/dns-query?{query}"))

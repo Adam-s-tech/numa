@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::ctx::ServerCtx;
@@ -14,9 +15,33 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use time::{Duration, OffsetDateTime};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::server::TlsStream;
+use tokio_rustls::TlsAcceptor;
 
 const CA_VALIDITY_DAYS: i64 = 3650; // 10 years
 const CERT_VALIDITY_DAYS: i64 = 365; // 1 year
+const HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 1 } else { 10 });
+
+pub(crate) async fn accept_tls<S: AsyncRead + AsyncWrite + Unpin>(
+    acceptor: &TlsAcceptor,
+    stream: S,
+    remote_addr: SocketAddr,
+    label: &str,
+) -> Option<TlsStream<S>> {
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(e)) => {
+            debug!("{label}: TLS handshake failed from {remote_addr}: {e}");
+            None
+        }
+        Err(_) => {
+            debug!("{label}: TLS handshake timeout from {remote_addr}");
+            None
+        }
+    }
+}
 
 /// Common Name on Numa's local CA. Referenced by trust-store helpers
 /// (`security`, `certutil`) when locating the cert for removal.
