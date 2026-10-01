@@ -13,7 +13,6 @@
 //! ever unauthenticated. Numa is a resolver first: nothing here may stop it from
 //! starting, or the host loses DNS and with it the means to read the docs.
 
-use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -105,7 +104,9 @@ pub(crate) fn ensure_token(
         None => {
             let token = mint_token();
             let path = data_dir.join(TOKEN_FILE);
-            let stored = store_token(&path, &token).is_ok().then_some(path);
+            let stored = crate::persist::write_private(&path, format!("{token}\n").as_bytes())
+                .is_ok()
+                .then_some(path);
             (token.clone(), Some(MintedToken { token, stored }))
         }
     };
@@ -127,22 +128,6 @@ fn mint_token() -> String {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("OS RNG unavailable");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// `create_new` so a concurrent start can't be clobbered, and 0600 *at* creation
-/// so the secret is never briefly world-readable.
-fn store_token(path: &Path, token: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    writeln!(opts.open(path)?, "{token}")
 }
 
 /// Real client IP for the auth decision. A loopback peer may be our `.numa`
