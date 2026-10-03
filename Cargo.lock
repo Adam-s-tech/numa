@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "numa"
-version = "0.24.0"
+version = "0.24.1"
 dependencies = [
  "arc-swap",
  "axum",
